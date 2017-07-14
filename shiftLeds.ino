@@ -36,28 +36,35 @@ int G = 5;
 
 /* ########################### LEDS ########################### */
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, STRIP_PIN, NEO_RGB + NEO_KHZ800);
-byte rgbLEDState = LOW;
-int brightness = 30;
-uint32_t currentColor = strip.Color(0, 40, 255);
+int brightness = 40;
+uint32_t currentColor = strip.Color(100, 100, 255);
 uint32_t prevColor = strip.Color(255, 100, 100);
 uint8_t leds = 0x01;
 
 typedef enum {
-  NONE, COUNT, RAINBOW
+  NONE, COUNT, RAINBOW, RAINBOW_CYCLE, CHASE_RAINBOW, SPARKLE
 } color_mode_t;
   
 color_mode_t colorMode = COUNT;
 uint8_t countModeCounter = 0;
 
+// Sparkle mode
+int speedDelayInterval = 500;
+unsigned long previousSparkleSpeedMillis = 0;
+
+// Rainbow modes
+int rainbowInterval = 80;
+int rainbowCycleInterval = 25;
+int rainbowChaseInterval = 80;
+unsigned long previousRainbowUpdateMillis = 0;
+
 /* ########################### Numitrons ########################### */
-//holders for infromation you're going to pass to shifting function
 byte dataLSB = 0x00;
 byte dataMSB = 0x00;
 
 /* ########################### Other ########################### */
 unsigned long currentMillis = 0;    // stores the value of millis() in each iteration of loop()
 uint16_t count = 0;
-
 
 void setup() {
   Serial.begin(115200);
@@ -73,7 +80,7 @@ void loop() {
   currentMillis = millis();
   doShift();
   doESP();
-  parseSerial();
+  doMode();
 }
 
 
@@ -89,7 +96,7 @@ void initESP() {
   
   sendData("AT+CIPMUX=1\r\n",3000,DEBUG); // configure for multiple connections
   sendData("AT+CIPSERVER=1,80\r\n",1000,DEBUG); // turn on server on port 80
-  sendData("AT+CWJAP=\"lolololol\",\"yourWifiPassword\"\r\n",7000,DEBUG); // connect Wi-Fi
+  sendData("AT+CWJAP=\"lolololol\",\"wifiPassHere\"\r\n",7000,DEBUG); // connect Wi-Fi
   sendData("AT+CIFSR\r\n",3000,DEBUG); // Get IP
 }
 
@@ -103,9 +110,9 @@ void doESP() {
       // request: +IPD,ch,len:data
       sscanf(buffer+5, "%d,%d", &ch_id, &packet_len);
 
-      if(packet_len > 0){
+      if (packet_len > 0) {
         pb = buffer+5;
-        while(*pb!=':') pb++;
+        while (*pb!=':') pb++;
         pb++;
         if (strncmp(pb, "GET /on", 7) == 0) {
           enableClock();
@@ -163,8 +170,8 @@ void sendOK(int ch_id) {
   cipSend +=webpage.length();
   cipSend +="\r\n";
   
-  sendData(cipSend,1000,DEBUG);
-  sendData(webpage,1000,DEBUG);
+  sendData(cipSend, 1000, DEBUG);
+  sendData(webpage, 1000, DEBUG);
   
   
   String closeCommand = "AT+CIPCLOSE="; 
@@ -189,22 +196,22 @@ void parseNewTime(char* pb) {
 }
 
 String sendData(String command, const int timeout, boolean debug) {
-    String response = "";
-    esp8266.print(command); // send the read character to the esp8266
-    long int time = millis();
+  String response = "";
+  esp8266.print(command); // send the read character to the esp8266
+  long int time = millis();
 
-    while((time+timeout) > millis()) {
-      while(esp8266.available()) {
-        // The esp has data so display its output to the serial window 
-        char c = esp8266.read(); // read the next character.
-        response+=c;
-      }  
-    }
-    if(debug)
-    {
-      Serial.print(response);
-    }
-    return response;
+  while((time+timeout) > millis()) {
+    while(esp8266.available()) {
+      // The esp has data so display its output to the serial window 
+      char c = esp8266.read(); // read the next character.
+      response+=c;
+    }  
+  }
+  if(debug)
+  {
+    Serial.print(response);
+  }
+  return response;
 }
 
 void clearSerialBuffer(void) {
@@ -263,6 +270,7 @@ void doShift() {
       dataLSB = count;
       dataMSB = (byte) (count >> 8); ;
 
+      // This is just for a cool animation when the clock starts :)
       if (initialClockStart == true) {
         //ground latchPin and hold low for as long as you are transmitting
         digitalWrite(latchPin, 0);
@@ -286,7 +294,7 @@ void doShift() {
         digitalWrite(latchPin, 1);
         digitalWrite(G, 0); // Show new output
         delay(1000);
-        doMode();
+        doModeCount();
         digitalWrite(latchPin, 0);
         digitalWrite(G, 1); // Hold output
         
@@ -296,7 +304,7 @@ void doShift() {
         digitalWrite(latchPin, 1);
         digitalWrite(G, 0); // Show new output
         delay(1000);
-        doMode();
+        doModeCount();
         digitalWrite(latchPin, 0);
         digitalWrite(G, 1); // Hold output
         
@@ -306,7 +314,7 @@ void doShift() {
         digitalWrite(latchPin, 1);
         digitalWrite(G, 0); // Show new output
         delay(1000);
-        doMode();
+        doModeCount();
         initialClockStart = false;
       } else {
         //ground latchPin and hold low for as long as you are transmitting
@@ -324,7 +332,7 @@ void doShift() {
         digitalWrite(G, 0); // Show new output
       }
       
-      doMode();
+      doModeCount();
       count++;
     }
 }
@@ -368,7 +376,7 @@ void shiftOut(int myDataPin, int myClockPin, byte myDataOut) {
   digitalWrite(myDataPin, 0);
   digitalWrite(myClockPin, 0);
 
-  for (i=7; i>=0; i--)  {
+  for (i = 7; i >= 0; i--)  {
     digitalWrite(myClockPin, 0);
 
     //if the value passed to myDataOut and a bitmask result 
@@ -415,27 +423,6 @@ DateTime getTime() {
   return rtc.now();
 }
 
-
-void parseSerial() {
-  if (Serial.available()){
-    String cmd = Serial.readStringUntil(':');
-    if(cmd.equals("brightness")){
-      int brightness = Serial.readStringUntil('\n').toInt();
-      setBrightness(brightness);
-    } else if(cmd.equals("rgb")){
-      setColor(parseRGB());
-    } else if(cmd.equals("mode")){
-      String mode = Serial.readStringUntil(':');
-      int speed = Serial.readStringUntil('\n').toInt();
-      setMode(mode, speed);
-    } else if(cmd.equals("brightnessUp")){
-      setBrightness(brightness + 25); 
-    } else if(cmd.equals("brightnessDown")){
-      setBrightness(brightness - 25);
-    }
-  }
-}
-
 /* ########################### WSB LEDS ########################### */
 
 void initWSBLeds() {
@@ -460,38 +447,17 @@ void parseAndSetRGB(char* pb) {
 void parseAndSetMode(char* pb) {
   if (strncmp(pb, "count", 5) == 0) {
     colorMode = COUNT;
+  } else if (strncmp(pb, "sparkle", 7) == 0) {
+    colorMode = SPARKLE;
+  } else if (strncmp(pb, "rainbow_cycle", 13) == 0) {
+    colorMode = RAINBOW_CYCLE;
+  } else if (strncmp(pb, "rainbow", 7) == 0) {
+    colorMode = RAINBOW;
   } else if (strncmp(pb, "none", 4) == 0) {
     colorMode = NONE;
     colorWipe(currentColor, 0);
-  }
-}
-
-void blinkRGBLeds() {
-  if (rgbLEDState == LOW) {
-    rgbLEDState = HIGH;
-    colorWipe(currentColor, 0);
-    
-  } else {
-    rgbLEDState = LOW;
-    colorWipe(strip.Color(0, 0, 0), 0);
-  }
-}
-
-void setColor(uint32_t c){
-  prevColor = currentColor;
-  currentColor = c;
-  if (colorMode == NONE){
-      colorWipe(c, 100);
-  }
-}
-
-void setMode(String mode, int speed){
-  if(mode.equals("rainbow")){
-    rainbow(speed);    
-  } else if(mode.equals("count")){
-    mode = COUNT;
-  } else if(mode.equals("theaterChaseRainbow")){
-    theaterChaseRainbow(speed);
+  } else if (strncmp(pb, "chase_rainbow", 13) == 0) {
+    colorMode = CHASE_RAINBOW;
   }
 }
 
@@ -526,7 +492,7 @@ void colorWipe(uint32_t c, uint8_t wait) {
   strip.show();
 }
 
-void doMode(){
+void doModeCount(){
   if (colorMode == COUNT) {
     for (uint16_t i = 0; i < countModeCounter; i++) {
       setPixelColor(i, prevColor);
@@ -542,75 +508,97 @@ void doMode(){
   }
 }
 
-/* ########################### LED Modes ###########################
-  Modes are not modified to work in "parallell" with displaying time and such.
-  This is TODO
-*/
+void doMode(){
+  if (colorMode == SPARKLE) {
+    snowSparkle(0x30, 0x30, 0x30, 25);
+  } else if (colorMode == RAINBOW) {
+    rainbow();
+  } else if (colorMode == RAINBOW_CYCLE) {
+    rainbowCycle();
+  } else if (colorMode == CHASE_RAINBOW) {
+    theaterChaseRainbow();
+  }
+}
 
-void rainbow(uint8_t wait) {
-  uint16_t i, j;
 
-  for(j=0; !Serial.available(); j++) {
-    for(i=0; i<strip.numPixels(); i++) {
-      setPixelColor(i, Wheel((i+j%255) & 255));
-      if(Serial.available()) return;
+/* ########################### LED Modes ########################### */
+
+
+void snowSparkle(byte red, byte green, byte blue, int sparkleDelay) {
+  if (currentMillis - previousSparkleSpeedMillis >= speedDelayInterval) {
+    previousSparkleSpeedMillis += speedDelayInterval;
+    
+    for(uint16_t i = 0; i < NUM_LEDS; i++) {
+      strip.setPixelColor(i, strip.Color(red, green, blue));
+    }
+    
+    int sparkPixel = random(NUM_LEDS);
+    setPixelColor(sparkPixel, strip.Color(0xff, 0xff, 0xff));
+    strip.show();
+    delay(sparkleDelay); // We can live with a such a small delay here, as long as it's not more than a few ms.
+    setPixelColor(sparkPixel, strip.Color(red, green, blue));
+    strip.show();
+    speedDelayInterval = random(500, 2000);
+    previousSparkleSpeedMillis = currentMillis;
+  }
+}
+
+void rainbow() {
+  if (currentMillis - previousRainbowUpdateMillis > rainbowInterval) {
+    previousRainbowUpdateMillis += rainbowInterval;
+
+    static uint16_t j = 0;
+    for (int i = 0; i < strip.numPixels(); i++) {
+      strip.setPixelColor(i, Wheel((i+j) & 255));
     }
     strip.show();
-    delay(wait);
+    j++;
+    if (j >= 256) j = 0;
   }
 }
 
-void rainbowCycle(uint8_t wait) {
-  uint16_t i, j;
+void rainbowCycle() {
+  if (currentMillis - previousRainbowUpdateMillis > rainbowCycleInterval) {
+    previousRainbowUpdateMillis += rainbowCycleInterval;
 
-  for(j=0; !Serial.available(); j++) {
-    for(i=0; i< strip.numPixels(); i++) {
-      setPixelColor(i, Wheel(((i * 256 / strip.numPixels()) + (j % 255*5)) & 255));
+    static uint16_t j = 0;
+    for (int i = 0; i < strip.numPixels(); i++) {
+      strip.setPixelColor(i, Wheel(((i * 256 / strip.numPixels()) + j) & 255));
     }
     strip.show();
-    delay(wait);
+    j++;
+    if (j >= 256 * 5) j = 0;
   }
 }
 
-void theaterChase(uint32_t c, uint8_t wait) {
-  for (int j=0; j<10; j++) {
-    for (int q=0; q < 3; q++) {
-      for (uint16_t i=0; i < strip.numPixels(); i=i+3) {
-        setPixelColor(i+q, c);
-      }
-      if(Serial.available()) return;
-      strip.show();
+void theaterChaseRainbow() {
+  if (currentMillis - previousRainbowUpdateMillis > rainbowChaseInterval) {
+    previousRainbowUpdateMillis += rainbowChaseInterval;
 
-      delay(wait);
-
-      for (uint16_t i=0; i < strip.numPixels(); i=i+3) {
-        setPixelColor(i+q, 0);
+    static int j = 0, q = 0;
+    static boolean on = true;
+    if (on) {
+      for (int i = 0; i < strip.numPixels(); i = i + 3) {
+        strip.setPixelColor(i+q, Wheel( (i+j) % 255));
       }
+    } else {
+      for (int i=0; i < strip.numPixels(); i = i + 3) {
+        strip.setPixelColor(i + q, 0);
+      }
+    }
+    on = !on; 
+    strip.show();
+    q++;
+    if (q >= 3 ) {
+      q = 0;
+      j++;
+      if (j >= 256) j = 0;
     }
   }
 }
-
-void theaterChaseRainbow(uint8_t wait) {
-  for (int j=0; j < 256; j++) {
-    for (int q=0; q < 3; q++) {
-      for (uint16_t i=0; i < strip.numPixels(); i=i+3) {
-        setPixelColor(i+q, Wheel( (i+j) % 255));
-      }
-      strip.show();
-      if(Serial.available()) return;
-      delay(wait);
-
-      for (uint16_t i=0; i < strip.numPixels(); i=i+3) {
-        setPixelColor(i+q, 0);
-      }
-    }
-  }
-}
-
-
 
 // Input a value 0 to 255 to get a color value.
-// The colours are a transition r - g - b - back to r.
+// The colors are a transition r - g - b - back to r.
 uint32_t Wheel(byte WheelPos) {
   WheelPos = 255 - WheelPos;
   if(WheelPos < 85) {
